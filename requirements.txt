@@ -1,2 +1,5 @@
 python-dotenv==0.21.0
-python-telegram-bot==20.3
+python-telegram-bot==20.3  # Telegram bot library
+nltk==3.8.1                # Natural Language Toolkit for NLP
+python-dotenv==1.0.0       # To load environment variables from .env
+
