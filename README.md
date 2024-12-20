@@ -31,8 +31,7 @@ python-dotenv==1.0.0
 
 1. Clone the repository:  
    ```bash  
-   git clone
-https://github.com/pk1151222/quizzebot 
+   git clone https://github.com/pk1151222/quizzebot 
    cd quizzebot
    ```  
 
