@@ -1,173 +1,166 @@
-import json
 import os
-from dotenv import load_dotenv
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    Update,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+import json
+import random
+import nltk
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
-# Load environment variables
-load_dotenv()
+# Download necessary NLTK data (first-time usage)
+nltk.download('punkt')
+nltk.download('stopwords')
+
+# Load environment variables from .env file
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Quiz data structure
+# File paths
+LEADERBOARD_FILE = "leaderboard.json"
+QUESTIONS_FILE = "questions.json"
+
+# Initialize global variables
+global_questions = []
 quiz_data = {"questions": [], "current_question": 0, "score": 0}
+TOP_N = 10  # Limit leaderboard to top N users
 
-# Commands List
-commands = {
-    "/start": "Start the quiz",
-    "/stop": "Stop the bot",
-    "/help": "Get help",
-    "/language": "Change language (Hindi/English)",
-    "/score": "Check your score",
-}
+# Generate a unique session ID for the current session
+SESSION_ID = datetime.now().strftime("%Y%m%d%H%M%S")
 
-# User States
-user_states = {}
+# Load or initialize leaderboard
+if os.path.exists(LEADERBOARD_FILE):
+    with open(LEADERBOARD_FILE, "r", encoding="utf-8") as f:
+        leaderboard = json.load(f)
+else:
+    leaderboard = {}
 
+# Load or initialize questions
+if os.path.exists(QUESTIONS_FILE):
+    with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
+        global_questions = json.load(f)
+else:
+    global_questions = []
 
-def load_questions():
-    """
-    Load questions from the local JSON file.
-    """
-    with open("questions_hindi.json", "r", encoding="utf-8") as file:
-        return json.load(file)
+# Utility functions
+def save_leaderboard():
+    """Save the leaderboard to the JSON file."""
+    with open(LEADERBOARD_FILE, "w", encoding="utf-8") as f:
+        json.dump(leaderboard, f, ensure_ascii=False, indent=4)
 
+def save_questions():
+    """Save the questions to the JSON file."""
+    with open(QUESTIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(global_questions, f, ensure_ascii=False, indent=4)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Start the quiz and send the first question.
-    """
-    chat_id = update.message.chat_id
-    user_states[chat_id] = {"quiz_active": True, "score": 0}
+def validate_answer(user_answer, correct_answer):
+    """Validate the user's answer using basic NLP techniques."""
+    # Tokenize and remove stopwords
+    stop_words = set(stopwords.words('english'))
+    user_tokens = [word.lower() for word in word_tokenize(user_answer) if word.lower() not in stop_words]
+    correct_tokens = [word.lower() for word in word_tokenize(correct_answer) if word.lower() not in stop_words]
 
-    quiz_data["questions"] = load_questions()
-    quiz_data["current_question"] = 0
-    quiz_data["score"] = 0
+    # Check if the user's answer contains any correct tokens
+    matching_tokens = set(user_tokens) & set(correct_tokens)
+    
+    # If at least one matching token exists, consider it a correct answer
+    if matching_tokens:
+        return True
+    return False
 
-    await update.message.reply_text("🎉 Welcome to the Quiz Bot!\nType /help to see available commands.")
-    await send_question(update)
-
-
+# Command handlers
 async def send_question(update: Update):
-    """
-    Send the current question with options to the user.
-    """
-    question_index = quiz_data["current_question"]
-    if question_index < len(quiz_data["questions"]):
-        question = quiz_data["questions"][question_index]
-        question_text = (
-            f"Q{question_index + 1}: {question['question_hindi']} ({question['question']})"
-        )
-        options = [
-            InlineKeyboardButton(f"{opt_h} ({opt_e})", callback_data=opt_e)
-            for opt_e, opt_h in zip(question["options"], question["options_hindi"])
-        ]
-        keyboard = InlineKeyboardMarkup.from_column(options)
+    """Send the current quiz question."""
+    user = update.effective_user
+    user_data = leaderboard.get(user.id, {"questions_answered": [], "score": 0, "session": SESSION_ID})
 
-        if update.callback_query:
-            await update.callback_query.message.reply_text(question_text, reply_markup=keyboard)
-        else:
-            await update.message.reply_text(question_text, reply_markup=keyboard)
-    else:
-        await update.message.reply_text(
-            f"🎉 Quiz finished! Your score is {quiz_data['score']} / {len(quiz_data['questions'])}."
-        )
-        user_states.pop(update.message.chat_id, None)  # Reset state
+    if len(user_data["questions_answered"]) == len(global_questions):
+        await update.message.reply_text("🎉 You have completed all questions!")
+        return
 
+    remaining_questions = [
+        q for i, q in enumerate(global_questions) if i not in user_data["questions_answered"]
+    ]
+    question = random.choice(remaining_questions)
+    question_index = global_questions.index(question)
+
+    question_text = f"Q{question_index + 1}: {question['question']}"
+    options = [
+        InlineKeyboardButton(opt, callback_data=opt) for opt in question["options"]
+    ]
+    keyboard = InlineKeyboardMarkup.from_column(options)
+
+    await update.message.reply_text(question_text, reply_markup=keyboard)
+
+    # Track current question for the user
+    user_data["current_question"] = question_index
+    leaderboard[user.id] = user_data
+    save_leaderboard()
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handle the user's answer and provide feedback.
-    """
+    """Handle the user's answer and provide feedback."""
     query = update.callback_query
     await query.answer()
     selected_answer = query.data
 
-    question_index = quiz_data["current_question"]
-    correct_answer = quiz_data["questions"][question_index]["correct_answer"]
+    user = update.effective_user
+    user_data = leaderboard.get(user.id, {"questions_answered": [], "score": 0, "session": SESSION_ID})
+    current_question_index = user_data.get("current_question")
+    question = global_questions[current_question_index]
+    correct_answer = question["correct_answer"]
 
-    if selected_answer == correct_answer:
-        quiz_data["score"] += 1
+    if validate_answer(selected_answer, correct_answer):
+        user_data["score"] += 1
         await query.edit_message_text("✅ Correct!")
     else:
-        correct_answer_hindi = quiz_data["questions"][question_index]["correct_answer_hindi"]
-        await query.edit_message_text(
-            f"❌ Incorrect! Correct answer: {correct_answer_hindi} ({correct_answer})"
-        )
+        await query.edit_message_text(f"❌ Incorrect! Correct answer: {correct_answer}")
 
-    quiz_data["current_question"] += 1
+    # Mark question as answered
+    user_data["questions_answered"].append(current_question_index)
+    leaderboard[user.id] = user_data
+    save_leaderboard()
+
     await send_question(update)
 
+async def show_leaderboard(update: Update):
+    """Display the leaderboard with top scores for the current session."""
+    if not leaderboard:
+        await update.message.reply_text("🏆 No scores available yet.")
+        return
 
-async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Show the help menu with available commands.
-    """
-    help_text = "Here are the available commands:\n"
-    for cmd, desc in commands.items():
-        help_text += f"{cmd}: {desc}\n"
-    await update.message.reply_text(help_text)
+    leaderboard_text = f"🏆 Top {TOP_N} Leaderboard (Session {SESSION_ID}):\n"
+    session_leaderboard = [
+        (user_id, data) for user_id, data in leaderboard.items() if data["session"] == SESSION_ID
+    ]
+    sorted_session = sorted(session_leaderboard, key=lambda x: x[1]["score"], reverse=True)
+    for rank, (user_id, data) in enumerate(sorted_session[:TOP_N], 1):
+        leaderboard_text += (
+            f"{rank}. @{data['username']}: {data['score']} points\n"
+        )
 
+    await update.message.reply_text(leaderboard_text)
 
-async def show_commands_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_commands(update: Update):
+    """Show the available commands to the user."""
+    commands_text = """
+    Here are the available commands:
+    /start - Start the quiz
+    /leaderboard - Show the leaderboard
+    /help - Show this help message
     """
-    Show commands menu as a reply keyboard.
-    """
-    markup = ReplyKeyboardMarkup(
-        [[KeyboardButton(cmd)] for cmd in commands], resize_keyboard=True
-    )
-    await update.message.reply_text("Use the buttons below to interact with the bot:", reply_markup=markup)
-
-
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Stop the quiz and reset the user state.
-    """
-    chat_id = update.message.chat_id
-    user_states[chat_id] = {"quiz_active": False}
-    await update.message.reply_text("Quiz stopped. Thank you for playing!")
-    user_states.pop(chat_id, None)
-
-
-async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handle fallback messages when no command is matched.
-    """
-    chat_id = update.message.chat_id
-    if user_states.get(chat_id, {}).get("quiz_active", False):
-        await update.message.reply_text("Please use the commands or answer the quiz.")
-    else:
-        await update.message.reply_text("The bot is stopped. Type /start to begin again.")
-
+    await update.message.reply_text(commands_text)
 
 def main():
-    """
-    Main function to start the bot.
-    """
+    """Main function to start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stop", stop))
-    application.add_handler(CommandHandler("help", show_help))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
+    # Handlers
+    application.add_handler(CommandHandler("start", send_question))
+    application.add_handler(CommandHandler("leaderboard", show_leaderboard))
+    application.add_handler(CommandHandler("help", show_commands))
     application.add_handler(CallbackQueryHandler(handle_answer))
 
     print("Bot is running...")
     application.run_polling()
-
 
 if __name__ == "__main__":
     main()
